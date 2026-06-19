@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <div id="msg_box" style="height:300px;overflow-y:auto;border:1px solid #ccc;padding:10px;"></div>
+    <input id="input" style="width:80%;padding:8px" onkeydown="if(event.key === 'Enter') send();">
+    <button onclick="send()">发送</button>
+
+<script>
+    // 自动获取当前网页地址，适配本地/ngrok公网
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}/ws`;
+    const ws = new WebSocket(wsUrl);
+
+    const box = document.getElementById("msg_box");
+    const input = document.getElementById("input");
+
+
+    ws.onopen = () => {
+        box.innerHTML += `<p style="color:green">已连接聊天室</p>`;
+        box.scrollTop = box.scrollHeight;
+    };
+    
+    ws.onmessage = e => {
+        box.innerHTML += `<p>对方：${e.data}</p>`;
+        box.scrollTop = box.scrollHeight;
+    };
+
+    ws.onerror = () => {
+        box.innerHTML += `<p style="color:red">WebSocket连接失败</p>`;
+    }
+
+    function send(){
+        let text = input.value.trim();
+        if(!text) return;
+        ws.send(text);
+        box.innerHTML += `<p style="color:blue">我：${text}</p>`;
+        input.value = "";
+        box.scrollTop = box.scrollHeight;
+    }
+</script>
+</body>
+</html>
