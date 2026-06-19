@@ -1,12 +1,138 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
+<head>
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>简易聊天室</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "Microsoft YaHei", system-ui, sans-serif;
+        }
+        body {
+            background-color: #f5f7fa;
+            padding: 30px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        /* 聊天消息容器 */
+        #msg_box {
+            height: 450px;
+            overflow-y: auto;
+            border-radius: 16px;
+            padding: 20px;
+            background: #ffffff;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+            margin-bottom: 16px;
+        }
+        /* 美化滚动条 */
+        #msg_box::-webkit-scrollbar {
+            width: 6px;
+        }
+        #msg_box::-webkit-scrollbar-thumb {
+            background: #dcdfe6;
+            border-radius: 3px;
+        }
+        #msg_box::-webkit-scrollbar-track {
+            background: #f2f3f5;
+        }
+        /* 消息气泡通用 */
+        #msg_box p {
+            width: fit-content;
+            max-width: 75%; /* 超长文字最多占屏幕75%宽度，自动换行 */
+            padding: 8px 12px;
+            border-radius: 18px;
+            margin: 6px 0;
+            line-height: 1.5;
+            word-break: break-all;
+            font-size: 15px;
+        }
+        /* 对方消息气泡 */
+        #msg_box p:not([data-self]) {
+            background: #e4e7ed;
+            color: #303133;
+            border-top-left-radius: 4px;
+            text-align: left;
+        }
+        /* 自己消息气泡 */
+        #msg_box p[data-self="true"] {
+            background: #409eff;
+            color: white;
+            margin-left: auto;
+            border-top-right-radius: 4px;
+            text-align: right;
+        }
+        /* 系统提示文字（连接成功/失败） */
+        #msg_box p.system {
+            max-width: 100%;
+            text-align: center;
+            background: transparent;
+            color: #909399;
+            font-size: 13px;
+            padding: 4px;
+            margin: 12px 0;
+        }
+        /* 输入区域容器 */
+        .input-wrap {
+            display: flex;
+            gap: 10px;
+        }
+        #input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #dcdfe6;
+            border-radius: 24px;
+            outline: none;
+            font-size: 15px;
+            transition: border 0.2s;
+        }
+        #input:focus {
+            border-color: #409eff;
+        }
+        button {
+            padding: 0 24px;
+            background: #409eff;
+            color: #fff;
+            border: none;
+            border-radius: 24px;
+            cursor: pointer;
+            font-size: 15px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #66b1ff;
+        }
+    </style>
+</head>
 <body>
-    <div id="msg_box" style="height:300px;overflow-y:auto;border:1px solid #ccc;padding:10px;"></div>
-    <input id="input" style="width:80%;padding:8px" onkeydown="if(event.key === 'Enter') send();">
-    <button onclick="send()">发送</button>
+    <div style="position:fixed;top:10px;left:10px;background:#409eff;color:#fff;padding:4px 12px;border-radius:12px;font-size:14px;z-index:999;">
+    在线人数：<span id="onlineCount">0</span>
+    </div>
+    </div>
+    <div id="msg_box"></div>
+    <div class="input-wrap">
+        <input id="input" placeholder="输入内容" onkeydown="if(event.key === 'Enter') send();">
+        <button onclick="send()">发送消息</button>
+    </div>
 
 <script>
-    // 自动获取当前网页地址，适配本地/ngrok公网
+    const onlineCountEl = document.getElementById('onlineCount');
+    function updateOnlineNum(num){
+        onlineCountEl.innerText = num;
+    }
+    function htmlEscape(str) {
+        if (!str) return '';
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+    // 自动获取当前网页地址，适配本地/ngrok/cpolar公网
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const wsUrl = `${protocol}//${host}/ws`;
@@ -15,29 +141,47 @@
     const box = document.getElementById("msg_box");
     const input = document.getElementById("input");
 
-
+    // 连接成功提示（居中灰色系统文字）
     ws.onopen = () => {
-        box.innerHTML += `<p style="color:green">已连接聊天室</p>`;
+        box.innerHTML += `<p class="system">✅ 已成功连接聊天室</p>`;
+        
         box.scrollTop = box.scrollHeight;
     };
     
+    // 收到对方消息
     ws.onmessage = e => {
-        box.innerHTML += `<p>对方：${e.data}</p>`;
-        box.scrollTop = box.scrollHeight;
+        const data = e.data;
+        // 拦截在线人数指令
+        if(data.startsWith("#N#")){
+            const num = data.replace("#N#", "");
+            updateOnlineNum(num);
+            return;
+        }
+        // 普通聊天消息渲染
+        const safeText = htmlEscape(data);
+        appendMsg(`<p>${safeText}</p>`);
     };
-
+    // 连接失败提示
     ws.onerror = () => {
-        box.innerHTML += `<p style="color:red">WebSocket连接失败</p>`;
+        box.innerHTML += `<p class="system">❌ WebSocket连接失败，请刷新页面</p>`;
     }
 
+    // 发送消息函数
     function send(){
         let text = input.value.trim();
         if(!text) return;
+        // 长度校验
+        if(text.length > 500){
+            alert("消息不能超过500个字符，请删减后再发送");
+            return; // 直接终止，不发送
+        }
         ws.send(text);
-        box.innerHTML += `<p style="color:blue">我：${text}</p>`;
+        const safeText = htmlEscape(text);
+        box.innerHTML += `<p data-self="true">${safeText}</p>`;
         input.value = "";
         box.scrollTop = box.scrollHeight;
     }
+    
 </script>
 </body>
 </html>
