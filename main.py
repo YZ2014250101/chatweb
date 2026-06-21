@@ -71,28 +71,42 @@ async def chat(websocket: WebSocket):
 
     try:
         while True:
-            raw_data = await websocket.receive_text()
+            # 关键改动：不再用receive_text，用receive兼容二进制+文本
+            recv_packet = await websocket.receive()
+
+            # ========== 分支1：收到二进制数据 = 语音消息 ==========
+            if "bytes" in recv_packet:
+                bin_raw = recv_packet["bytes"]
+                recv_byte = len(bin_raw)
+                total_download_bytes += recv_byte
+                print(f"【收到语音消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
+
+                # 二进制直接广播给其他人，send_bytes
+                msg_byte = recv_byte
+                for client in online_clients:
+                    if client != websocket:
+                        await client.send_bytes(bin_raw)
+                        total_upload_bytes += msg_byte
+                print(f"【广播下发】单条每条 {msg_byte} B，累计下行：{format_byte(total_upload_bytes)}")
+                continue
+
+            # ========== 分支2：收到文本消息（文字/在线人数指令#N#） ==========
+            raw_data = recv_packet["text"]
             recv_byte = len(raw_data.encode("utf-8"))
             total_download_bytes += recv_byte
 
-            # 全局超长消息拦截（兼容长语音base64）
+            # 全局超长消息拦截（文本类上限）
             if len(raw_data) > MAX_ALL_MSG_LENGTH:
                 print(f"【消息超长丢弃】长度{len(raw_data)}，超出上限{MAX_ALL_MSG_LENGTH}")
                 continue
 
-            # 区分消息类型
-            if raw_data.startswith("#VOICE#"):
-                # 语音消息：原样转发，不做任何转义
-                print(f"【收到语音消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
-                send_data = raw_data
-            else:
-                # 普通文字：前端已完成XSS转义，后端直接原始转发，删除html.escape双重转义
-                print(f"【收到文字消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
-                if len(raw_data) > MAX_TEXT_LENGTH:
-                    continue
-                send_data = raw_data
+            # 二进制方案已废弃#VOICE#，直接删除该分支
+            print(f"【收到文字消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
+            if len(raw_data) > MAX_TEXT_LENGTH:
+                continue
+            send_data = raw_data
 
-            # 广播给其他所有在线客户端
+            # 文本广播 send_text
             msg_byte = len(send_data.encode("utf-8"))
             for client in online_clients:
                 if client != websocket:

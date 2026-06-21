@@ -195,23 +195,43 @@
     };
 
     // 接收后端消息（在线人数/文字/语音）
-    ws.onmessage = e => {
+    ws.onmessage = async e => {
+        // 分支1：收到二进制数据 = 语音消息
+        if (e.data instanceof ArrayBuffer) {
+            const buf = new Uint8Array(e.data);
+            // 首字节0x01代表语音
+            if (buf[0] === 0x01) {
+                // 截取去掉标记后的纯音频二进制
+                const audioRaw = buf.slice(1);
+                const audioBlob = new Blob([audioRaw], { type: mimeType });
+                const audioSrc = URL.createObjectURL(audioBlob);
+                // 读取时长渲染气泡
+                const tempAudio = new Audio(audioSrc);
+                tempAudio.addEventListener('loadedmetadata', () => {
+                    const audioSecond = parseFloat(tempAudio.duration.toFixed(1));
+                    let bubbleWidth = 100 + audioSecond * 13;
+                    if (bubbleWidth > 300) bubbleWidth = 300;
+                    appendMsg(`
+                        <button 
+                            class="voice-play" 
+                            data-binary-url="${audioSrc}"
+                            style="width: ${bubbleWidth}px;"
+                        >
+                            语音 ${audioSecond}″
+                    `);
+                });
+                return;
+            }
+        }
+
+        // 分支2：普通文本消息（在线人数#N#、文字聊天）
         const data = e.data;
-        // 1. 在线人数指令 #N#数字
         if(data.startsWith("#N#")){
             const num = data.replace("#N#", "");
             updateOnlineNum(num);
             return;
         }
-        // 2. 语音消息 #VOICE#base64音频
-        if(data.startsWith("#VOICE#")){
-            const voiceSrc = data.replace("#VOICE#", "");
-            createVoiceHtml(voiceSrc, false).then(({html, isSelf})=>{
-                appendMsg(html, isSelf);
-            });
-            return;
-        }
-        // 3. 普通文字消息
+        // 旧的 #VOICE# base64 分支可以直接删除，不再使用
         const safeText = htmlEscape(data);
         appendMsg(safeText);
     };
@@ -317,8 +337,8 @@
                 recordStop();
             };
 
-            mediaRecorder.onstop = () => {
-                // ===== 替换原字节判断：计算真实录制时长 =====
+            mediaRecorder.onstop = async () => {
+                // 计时判断录音≥1秒
                 const recordCostMs = Date.now() - recordStartTime;
                 const recordCostSec = recordCostMs / 1000;
                 if (recordCostSec < MIN_RECORD_SECOND) {
@@ -326,20 +346,35 @@
                     audioChunks = [];
                     return;
                 }
-
-                // 拼接音频Blob
+                // 拼接二进制音频Blob
                 const audioBlob = new Blob(audioChunks, { type: mimeType });
-                // 转Base64，通过WebSocket发给后端广播
-                const reader = new FileReader();
-                reader.readAsDataURL(audioBlob);
-                reader.onloadend = async () => {
-                    const voiceBase64 = reader.result;
-                    // 发送语音消息
-                    ws.send(`#VOICE#${voiceBase64}`);
-                    // 调用复用函数生成自适应宽度语音气泡
-                    const { html, isSelf } = await createVoiceHtml(voiceBase64, true);
-                    appendMsg(html, isSelf);
-                };
+
+                // ========== 二进制发送逻辑 替换原Base64代码 ==========
+                // 1. 构造消息标记：0x01 代表语音二进制数据
+                const VOICE_FLAG = new Uint8Array([0x01]);
+                // 2. 合并标记 + 音频二进制
+                const totalBuf = await new Blob([VOICE_FLAG, audioBlob]).arrayBuffer();
+                // 3. WebSocket 直接发送二进制Buffer
+                ws.send(totalBuf);
+
+                // 本地渲染自己的语音气泡（仅前端本地展示，不用发给后端）
+                const localUrl = URL.createObjectURL(audioBlob);
+                const tempAudio = new Audio(localUrl);
+                tempAudio.addEventListener('loadedmetadata', () => {
+                    const audioSecond = parseFloat(tempAudio.duration.toFixed(1));
+                    let bubbleWidth = 100 + audioSecond * 13;
+                    if (bubbleWidth > 300) bubbleWidth = 300;
+                    appendMsg(`
+                        <button 
+                            class="voice-play" 
+                            data-binary-url="${localUrl}"
+                            style="width: ${bubbleWidth}px;"
+                        >
+                            语音 ${audioSecond}″
+                        </button>
+                    `, true);
+                });
+                // =====================================================
             };
 
             mediaRecorder.start();
@@ -395,22 +430,19 @@
     box.addEventListener("click", ev => {
         const target = ev.target;
         if (!target.classList.contains("voice-play")) return;
-        const audioSrc = target.dataset.audio;
+        const audioSrc = target.dataset.binaryUrl;
 
-        // 存在正在播放的语音，先暂停
         if (currentPlayingAudio) {
             currentPlayingAudio.pause();
             currentPlayingAudio = null;
         }
 
         const audio = new Audio(audioSrc);
-        // iOS强制外放扬声器
         if (audio.webkitAudioSessionCategory !== undefined) {
             audio.webkitAudioSessionCategory = "playback";
         }
         currentPlayingAudio = audio;
 
-        // 播放结束清空标记
         audio.addEventListener("ended", () => {
             if (currentPlayingAudio === audio) {
                 currentPlayingAudio = null;
