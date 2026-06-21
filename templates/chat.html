@@ -126,6 +126,7 @@
             -webkit-user-select: none;
             touch-action: none;
         }
+        
     </style>
 </head>
 <body>
@@ -205,7 +206,9 @@
         // 2. 语音消息 #VOICE#base64音频
         if(data.startsWith("#VOICE#")){
             const voiceSrc = data.replace("#VOICE#", "");
-            appendMsg(`<button class="voice-play" data-audio="${voiceSrc}">播放语音</button>`);
+            createVoiceHtml(voiceSrc, false).then(({html, isSelf})=>{
+                appendMsg(html, isSelf);
+            });
             return;
         }
         // 3. 普通文字消息
@@ -237,13 +240,27 @@
         input.value = "";
     }
 
-    // ====================== 录音完整修复模块（适配手机+PC，屏蔽长按复制） ======================
+
+
+
+
+
+
+
+
+
+
+
+
+    // ====================== 录音完整修复模块（最低录制1秒计时版） ======================
     let mediaRecorder = null;
     let audioStream = null;
     let audioChunks = [];
     let recordTimer = null;
-    const MIN_RECORD_BYTE = 1200; // 最低有效音频，过滤空白静音
-    const MAX_RECORD_SEC = 15;     // 最长15秒录音
+    let recordStartTime = 0; // 新增：记录按下录音的时间戳
+    const MIN_RECORD_SECOND = 1;  // 最低必须录制1秒
+    const MAX_RECORD_SEC = 15;    // 最长15秒录音
+    let currentPlayingAudio = null; // 全局播放锁，控制同时只能一条语音
 
     // 停止录音统一封装（接收事件对象，拦截默认行为）
     function recordStop(e) {
@@ -276,6 +293,7 @@
         audioChunks = [];
         if (audioStream) audioStream.getTracks().forEach(t => t.stop());
         mediaRecorder = null;
+        recordStartTime = Date.now(); // 记录录音开始时间
 
         try {
             // 获取麦克风
@@ -300,10 +318,11 @@
             };
 
             mediaRecorder.onstop = () => {
-                // 计算音频总大小，过滤短静音录音
-                const totalByte = audioChunks.reduce((sum, chunk) => sum + chunk.size, 0);
-                if (totalByte < MIN_RECORD_BYTE) {
-                    alert("录音太短，请持续说话至少1秒再松开！");
+                // ===== 替换原字节判断：计算真实录制时长 =====
+                const recordCostMs = Date.now() - recordStartTime;
+                const recordCostSec = recordCostMs / 1000;
+                if (recordCostSec < MIN_RECORD_SECOND) {
+                    alert(`录音时长不足${MIN_RECORD_SECOND}秒，请多说一会再松开！`);
                     audioChunks = [];
                     return;
                 }
@@ -313,12 +332,13 @@
                 // 转Base64，通过WebSocket发给后端广播
                 const reader = new FileReader();
                 reader.readAsDataURL(audioBlob);
-                reader.onloadend = () => {
+                reader.onloadend = async () => {
                     const voiceBase64 = reader.result;
                     // 发送语音消息
                     ws.send(`#VOICE#${voiceBase64}`);
-                    // 自己界面渲染语音气泡
-                    appendMsg(`<button class="voice-play" data-audio="${voiceBase64}">我的语音</button>`, true);
+                    // 调用复用函数生成自适应宽度语音气泡
+                    const { html, isSelf } = await createVoiceHtml(voiceBase64, true);
+                    appendMsg(html, isSelf);
                 };
             };
 
@@ -348,17 +368,56 @@
     recordBtn.addEventListener('touchend', recordStop);
     recordBtn.addEventListener('touchcancel', recordStop); // 手指滑出按钮自动停止
 
-    // 全局语音播放点击事件（新增iOS强制外放扬声器）
+    // 复用函数：根据base64音频生成带时长、自适应宽度的语音气泡
+    function createVoiceHtml(audioBase64, isSelf = false) {
+        return new Promise((resolve) => {
+            const tempAudio = new Audio(audioBase64);
+            tempAudio.addEventListener('loadedmetadata', () => {
+                const audioSecond = parseFloat(tempAudio.duration.toFixed(1));
+                let bubbleWidth = 100 + audioSecond * 13;
+                if (bubbleWidth > 300) bubbleWidth = 300;
+                const html = `
+                    <button 
+                        class="voice-play" 
+                        data-audio="${audioBase64}" 
+                        data-duration="${audioSecond}"
+                        style="width: ${bubbleWidth}px;"
+                    >
+                        语音 ${audioSecond}″
+                    </button>
+                `;
+                resolve({ html, isSelf });
+            });
+        });
+    }
+
+    // 全局语音播放点击事件【修改后：同一时间仅播放一条】
     box.addEventListener("click", ev => {
-        if (ev.target.classList.contains("voice-play")) {
-            const audioSrc = ev.target.dataset.audio;
-            const audio = new Audio(audioSrc);
-            // iOS safari强制媒体外放，不走听筒
-            if (audio.webkitAudioSessionCategory !== undefined) {
-                audio.webkitAudioSessionCategory = "playback";
-            }
-            audio.play().catch(e => console.log("播放拦截：", e));
+        const target = ev.target;
+        if (!target.classList.contains("voice-play")) return;
+        const audioSrc = target.dataset.audio;
+
+        // 存在正在播放的语音，先暂停
+        if (currentPlayingAudio) {
+            currentPlayingAudio.pause();
+            currentPlayingAudio = null;
         }
+
+        const audio = new Audio(audioSrc);
+        // iOS强制外放扬声器
+        if (audio.webkitAudioSessionCategory !== undefined) {
+            audio.webkitAudioSessionCategory = "playback";
+        }
+        currentPlayingAudio = audio;
+
+        // 播放结束清空标记
+        audio.addEventListener("ended", () => {
+            if (currentPlayingAudio === audio) {
+                currentPlayingAudio = null;
+            }
+        });
+
+        audio.play().catch(e => console.log("播放拦截：", e));
     })
 </script>
 </body>
