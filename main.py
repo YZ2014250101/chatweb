@@ -27,10 +27,11 @@ def format_byte(size: int) -> str:
     else:
         return f"{size / (1024 * 1024):.2f} MB"
 
+
 # 节流批量推送在线人数
 async def batch_push_online_count():
     global push_online_task, total_upload_bytes
-    push_online_task = None
+    push_online_task = None  # 任务执行第一时间清空标记，避免卡死
     current_count = len(online_clients)
     online_cmd = f"#N#{current_count}"
     cmd_byte_len = len(online_cmd.encode("utf-8"))
@@ -41,6 +42,7 @@ async def batch_push_online_count():
         total_upload_bytes += cmd_byte_len
     print(f"【下行流量更新】累计下行总流量：{format_byte(total_upload_bytes)}")
 
+    
 # 触发节流推送，短时间多次上下线合并为一次广播
 def trigger_throttle_push():
     global push_online_task
@@ -71,17 +73,16 @@ async def chat(websocket: WebSocket):
 
     try:
         while True:
-            # 关键改动：不再用receive_text，用receive兼容二进制+文本
             recv_packet = await websocket.receive()
 
-            # ========== 分支1：收到二进制数据 = 语音消息 ==========
+            # 第一步：优先判断二进制语音包（只有bytes键）
             if "bytes" in recv_packet:
                 bin_raw = recv_packet["bytes"]
                 recv_byte = len(bin_raw)
                 total_download_bytes += recv_byte
                 print(f"【收到语音消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
 
-                # 二进制直接广播给其他人，send_bytes
+                # 二进制广播
                 msg_byte = recv_byte
                 for client in online_clients:
                     if client != websocket:
@@ -90,23 +91,22 @@ async def chat(websocket: WebSocket):
                 print(f"【广播下发】单条每条 {msg_byte} B，累计下行：{format_byte(total_upload_bytes)}")
                 continue
 
-            # ========== 分支2：收到文本消息（文字/在线人数指令#N#） ==========
+            # 走到这里一定是文本包，安全读取text
             raw_data = recv_packet["text"]
             recv_byte = len(raw_data.encode("utf-8"))
             total_download_bytes += recv_byte
 
-            # 全局超长消息拦截（文本类上限）
+            # 超长文本拦截
             if len(raw_data) > MAX_ALL_MSG_LENGTH:
                 print(f"【消息超长丢弃】长度{len(raw_data)}，超出上限{MAX_ALL_MSG_LENGTH}")
                 continue
 
-            # 二进制方案已废弃#VOICE#，直接删除该分支
             print(f"【收到文字消息】上行 {recv_byte} B，累计上行：{format_byte(total_download_bytes)}")
             if len(raw_data) > MAX_TEXT_LENGTH:
                 continue
             send_data = raw_data
 
-            # 文本广播 send_text
+            # 文本广播
             msg_byte = len(send_data.encode("utf-8"))
             for client in online_clients:
                 if client != websocket:
@@ -117,7 +117,6 @@ async def chat(websocket: WebSocket):
     except WebSocketDisconnect:
         online_clients.remove(websocket)
         trigger_throttle_push()
-        # 客户端断开打印完整流量汇总
         print("\n===== 全局双向流量汇总 =====")
         print(f"客户端上行总流量：{format_byte(total_download_bytes)}")
         print(f"服务端下行总流量：{format_byte(total_upload_bytes)}")
