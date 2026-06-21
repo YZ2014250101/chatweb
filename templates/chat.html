@@ -105,24 +105,54 @@
         button:hover {
             background: #66b1ff;
         }
+        /* 语音播放按钮样式 */
+        .voice-play {
+            border: none;
+            background: #007aff;
+            color: #fff;
+            border-radius: 8px;
+            padding: 4px 10px;
+            cursor: pointer;
+        }
+        /* 录音按钮单独样式 */
+        #recordBtn {
+            background: #ff6b6b;
+        }
+        #recordBtn:hover {
+            background: #ff8787;
+        }
+        #recordBtn {
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
     </style>
 </head>
 <body>
+    <!-- 修复多余闭合div -->
     <div style="position:fixed;top:10px;left:10px;background:#409eff;color:#fff;padding:4px 12px;border-radius:12px;font-size:14px;z-index:999;">
-    在线人数：<span id="onlineCount">0</span>
+        在线人数：<span id="onlineCount">0</span>
     </div>
-    </div>
+
     <div id="msg_box"></div>
     <div class="input-wrap">
-        <input id="input" placeholder="输入内容" onkeydown="if(event.key === 'Enter') send();">
-        <button onclick="send()">发送消息</button>
+        <input id="input" placeholder="输入文字 / 按住右侧语音按钮发语音" onkeydown="if(event.key === 'Enter') send();">
+        <button onclick="send()">发送文字</button>
+        <button id="recordBtn" class="record-btn">按住说话</button>
     </div>
 
 <script>
     const onlineCountEl = document.getElementById('onlineCount');
+    const box = document.getElementById("msg_box");
+    const input = document.getElementById("input");
+    const recordBtn = document.getElementById('recordBtn');
+
+    // 更新在线人数
     function updateOnlineNum(num){
         onlineCountEl.innerText = num;
     }
+
+    // XSS转义
     function htmlEscape(str) {
         if (!str) return '';
         return str
@@ -132,56 +162,204 @@
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     }
-    // 自动获取当前网页地址，适配本地/ngrok/cpolar公网
+
+    // 统一消息渲染，限制最多50条消息，防抖滚动
+    let scrollTimer = null;
+    function appendMsg(htmlStr, isSelf = false) {
+        if (isSelf) {
+            box.innerHTML += `<p data-self="true">${htmlStr}</p>`;
+        } else {
+            box.innerHTML += `<p>${htmlStr}</p>`;
+        }
+        // 超过50条自动删除最早消息，防止卡顿
+        while (box.children.length > 50) {
+            box.removeChild(box.firstElementChild);
+        }
+        // 防抖滚动
+        clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+            box.scrollTop = box.scrollHeight;
+        }, 30);
+    }
+
+    // WS地址自动适配http/https
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const wsUrl = `${protocol}//${host}/ws`;
     const ws = new WebSocket(wsUrl);
 
-    const box = document.getElementById("msg_box");
-    const input = document.getElementById("input");
-
-    // 连接成功提示（居中灰色系统文字）
+    // WS连接成功
     ws.onopen = () => {
-        box.innerHTML += `<p class="system">✅ 已成功连接聊天室</p>`;
-        
-        box.scrollTop = box.scrollHeight;
+        appendMsg(`<span style="color:#909399;">✅ 已成功连接聊天室</span>`);
     };
-    
-    // 收到对方消息
+
+    // 接收后端消息（在线人数/文字/语音）
     ws.onmessage = e => {
         const data = e.data;
-        // 拦截在线人数指令
+        // 1. 在线人数指令 #N#数字
         if(data.startsWith("#N#")){
             const num = data.replace("#N#", "");
             updateOnlineNum(num);
             return;
         }
-        // 普通聊天消息渲染
+        // 2. 语音消息 #VOICE#base64音频
+        if(data.startsWith("#VOICE#")){
+            const voiceSrc = data.replace("#VOICE#", "");
+            appendMsg(`<button class="voice-play" data-audio="${voiceSrc}">播放语音</button>`);
+            return;
+        }
+        // 3. 普通文字消息
         const safeText = htmlEscape(data);
-        appendMsg(`<p>${safeText}</p>`);
+        appendMsg(safeText);
     };
-    // 连接失败提示
+
+    // WS连接失败
     ws.onerror = () => {
-        box.innerHTML += `<p class="system">❌ WebSocket连接失败，请刷新页面</p>`;
+        appendMsg(`<span style="color:red;">❌ WebSocket连接失败，请刷新页面</span>`);
     }
 
-    // 发送消息函数
+    // WS断开
+    ws.onclose = () => {
+        appendMsg(`<span style="color:red;">⚠️ 连接已断开，请刷新页面重连</span>`);
+    }
+
+    // 发送文字消息
     function send(){
         let text = input.value.trim();
         if(!text) return;
-        // 长度校验
         if(text.length > 500){
             alert("消息不能超过500个字符，请删减后再发送");
-            return; // 直接终止，不发送
+            return;
         }
         ws.send(text);
         const safeText = htmlEscape(text);
-        box.innerHTML += `<p data-self="true">${safeText}</p>`;
+        appendMsg(safeText, true);
         input.value = "";
-        box.scrollTop = box.scrollHeight;
     }
-    
+
+    // ====================== 录音完整修复模块（适配手机+PC，屏蔽长按复制） ======================
+    let mediaRecorder = null;
+    let audioStream = null;
+    let audioChunks = [];
+    let recordTimer = null;
+    const MIN_RECORD_BYTE = 1200; // 最低有效音频，过滤空白静音
+    const MAX_RECORD_SEC = 15;     // 最长15秒录音
+
+    // 停止录音统一封装（接收事件对象，拦截默认行为）
+    function recordStop(e) {
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        clearTimeout(recordTimer);
+        if (!mediaRecorder || mediaRecorder.state !== "recording") return;
+        mediaRecorder.stop();
+
+        // 1. 彻底关闭麦克风轨道，释放通话音频占用（解决手机播放走听筒）
+        audioStream.getTracks().forEach(track => {
+            track.stop();
+            track.enabled = false;
+        });
+        audioStream = null;
+        mediaRecorder = null;
+
+        recordBtn.innerText = "按住说话";
+    }
+
+    // 按下开始录音（接收事件对象，阻止长按复制弹窗）
+    async function recordStart(e) {
+        // 核心：拦截浏览器长按、选文字、弹出菜单默认行为
+        e.preventDefault();
+        e.stopPropagation();
+
+        // 每次录音前置清空旧数据，防止分片错乱
+        audioChunks = [];
+        if (audioStream) audioStream.getTracks().forEach(t => t.stop());
+        mediaRecorder = null;
+
+        try {
+            // 获取麦克风
+            audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // 兼容mp4避免听筒模式，优先mp4
+            let mimeType;
+            if (MediaRecorder.isTypeSupported("audio/mp4")) {
+                mimeType = "audio/mp4";
+            } else if (MediaRecorder.isTypeSupported("audio/webm; codecs=opus")) {
+                mimeType = "audio/webm; codecs=opus";
+            }
+            mediaRecorder = new MediaRecorder(audioStream, { mimeType });
+
+            // 所有事件必须在start前绑定（MDN文档强制规范）
+            mediaRecorder.ondataavailable = e => {
+                if (e.data.size > 0) audioChunks.push(e.data);
+            };
+
+            mediaRecorder.onerror = err => {
+                alert("录音异常：" + err.message);
+                recordStop();
+            };
+
+            mediaRecorder.onstop = () => {
+                // 计算音频总大小，过滤短静音录音
+                const totalByte = audioChunks.reduce((sum, chunk) => sum + chunk.size, 0);
+                if (totalByte < MIN_RECORD_BYTE) {
+                    alert("录音太短，请持续说话至少1秒再松开！");
+                    audioChunks = [];
+                    return;
+                }
+
+                // 拼接音频Blob
+                const audioBlob = new Blob(audioChunks, { type: mimeType });
+                // 转Base64，通过WebSocket发给后端广播
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = () => {
+                    const voiceBase64 = reader.result;
+                    // 发送语音消息
+                    ws.send(`#VOICE#${voiceBase64}`);
+                    // 自己界面渲染语音气泡
+                    appendMsg(`<button class="voice-play" data-audio="${voiceBase64}">我的语音</button>`, true);
+                };
+            };
+
+            mediaRecorder.start();
+            recordBtn.innerText = `松开发送(最长${MAX_RECORD_SEC}s)`;
+
+            // 15秒自动停止
+            recordTimer = setTimeout(() => {
+                recordStop();
+                alert("语音最长15秒，已自动停止");
+            }, MAX_RECORD_SEC * 1000);
+
+        } catch (err) {
+            alert("麦克风权限获取失败！本地localhost可正常使用，公网访问需要HTTPS");
+            console.error("麦克风错误：", err);
+        }
+    }
+
+    // ========== 绑定事件：PC鼠标 + 手机触摸双兼容 ==========
+    // PC鼠标
+    recordBtn.onmousedown = recordStart;
+    recordBtn.onmouseup = recordStop;
+    recordBtn.onmouseleave = recordStop;
+
+    // 手机触摸（关键，解决长按复制、滑出停止录音）
+    recordBtn.addEventListener('touchstart', recordStart);
+    recordBtn.addEventListener('touchend', recordStop);
+    recordBtn.addEventListener('touchcancel', recordStop); // 手指滑出按钮自动停止
+
+    // 全局语音播放点击事件（新增iOS强制外放扬声器）
+    box.addEventListener("click", ev => {
+        if (ev.target.classList.contains("voice-play")) {
+            const audioSrc = ev.target.dataset.audio;
+            const audio = new Audio(audioSrc);
+            // iOS safari强制媒体外放，不走听筒
+            if (audio.webkitAudioSessionCategory !== undefined) {
+                audio.webkitAudioSessionCategory = "playback";
+            }
+            audio.play().catch(e => console.log("播放拦截：", e));
+        }
+    })
 </script>
 </body>
 </html>
